@@ -1844,12 +1844,29 @@ aimlapi.post('/generate-image', async (req, res) => {
         const key = readSecret(req.user.directories, SECRET_KEYS.AIMLAPI);
         if (!key) return res.sendStatus(400);
 
-        console.debug('AI/ML API image request:', req.body);
+        const payload = { ...req.body };
+        const modelLower = String(payload.model || '').toLowerCase();
+
+        // Safety normalization: ensure model-family specific resolution parameters are present
+        const isGoogleLike = modelLower.includes('google') || modelLower.includes('gemini') || modelLower.includes('nano-banana') || modelLower.includes('imagen');
+        const isXaiLike = modelLower.includes('x-ai') || modelLower.includes('grok');
+        const isOpenAiLike = modelLower.includes('openai') || modelLower.includes('dall-e') || modelLower.includes('gpt-image');
+
+        if (!isGoogleLike && !isXaiLike && !isOpenAiLike) {
+            // For SD/Flux/Recraft/Qwen models, ensure image_size is an object with multiples of 32
+            if (!payload.image_size && (payload.width || payload.height)) {
+                const w = Math.round((Number(payload.width) || 512) / 32) * 32;
+                const h = Math.round((Number(payload.height) || 512) / 32) * 32;
+                payload.image_size = { width: w, height: h };
+            }
+        }
+
+        console.debug('AI/ML API image request:', payload);
 
         const apiRes = await fetch('https://api.aimlapi.com/v1/images/generations', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, ...AIMLAPI_HEADERS },
-            body: JSON.stringify(req.body),
+            body: JSON.stringify(payload),
         });
         if (!apiRes.ok) {
             const err = await apiRes.text();
@@ -1870,7 +1887,7 @@ aimlapi.post('/generate-image', async (req, res) => {
                 format = mime.extension(imgObj.mime_type) || 'png';
             }
         } else if (imgObj.url) {
-            const blobRes = await fetch(imgObj.url);
+            const blobRes = await fetch(imgObj.url, { redirect: 'follow' });
             if (!blobRes.ok) throw new Error('Failed to fetch image URL');
             const contentType = blobRes.headers.get('content-type');
             if (contentType) format = mime.extension(contentType) || 'png';
