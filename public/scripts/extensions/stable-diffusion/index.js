@@ -2522,6 +2522,8 @@ async function loadZaiModels() {
 }
 
 async function loadOpenRouterModels() {
+    $('#sd_openrouter_key').toggleClass('success', !!secret_state[SECRET_KEYS.OPENROUTER]);
+
     const result = await fetch('/api/openrouter/models/image', {
         method: 'POST',
         headers: getRequestHeaders({ omitContentType: true }),
@@ -3362,7 +3364,7 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
                 result = await generateOpenAiImage(prefixedPrompt, signal);
                 break;
             case sources.aimlapi:
-                result = await generateAimlapiImage(prefixedPrompt, signal);
+                result = await generateAimlapiImage(prefixedPrompt, negativePrompt, signal);
                 break;
             case sources.comfy:
                 switch (extension_settings.sd.comfy_type) {
@@ -3562,12 +3564,23 @@ async function generateExtrasImage(prompt, negativePrompt, signal) {
  * Gets an aspect ratio for Stability that is the closest to the given width and height.
  * @param {number} width Target width
  * @param {number} height Target height
- * @param {'google'|'stability'|'zai'|'xai'} source Source of the request, used to determine aspect ratio
+ * @param {'google'|'stability'|'zai'|'xai'|'openrouter'} source Source of the request, used to determine aspect ratio
  * @returns {string} Closest aspect ratio as a string
  */
 function getClosestAspectRatio(width, height, source) {
     function getAspectRatios() {
         switch (source) {
+            case 'openrouter':
+                return {
+                    '1:1': 1,
+                    '16:9': 16 / 9,
+                    '9:16': 9 / 16,
+                    '4:3': 4 / 3,
+                    '3:4': 3 / 4,
+                    '3:2': 3 / 2,
+                    '2:3': 2 / 3,
+                    '21:9': 21 / 9,
+                };
             case 'stability':
                 return {
                     '16:9': 16 / 9,
@@ -4172,27 +4185,42 @@ async function generateOpenAiImage(prompt, signal) {
  * - Extracts the URL or base64 response.
  * - If it’s a URL, fetches the image and converts to base64.
  * - Returns { format: 'png', data: '<base64 string>' }, ready for saveBase64AsFile().
+ * @param {string} prompt Prompt text
+ * @param {string} [negativePrompt] Negative prompt text
+ * @param {AbortSignal} [signal] Abort signal
  */
-async function generateAimlapiImage(prompt, signal) {
-    const model = extension_settings.sd.model.toLowerCase();
+async function generateAimlapiImage(prompt, negativePrompt, signal) {
+    const model = (extension_settings.sd.model || '').trim();
+    const modelLower = model.toLowerCase();
     const isSdLike =
-        model.startsWith('flux/') ||
-        model.startsWith('stable') ||
-        model === 'recraft-v3' ||
-        model === 'triposr';
+        modelLower.includes('flux') ||
+        modelLower.includes('stable') ||
+        modelLower.includes('sdxl') ||
+        modelLower.includes('recraft') ||
+        modelLower.includes('midjourney') ||
+        modelLower.includes('triposr');
 
     const body = { prompt, model };
     if (isSdLike) {
         body.steps = clamp(extension_settings.sd.steps, 1, 50);
-        body.guidance = clamp(extension_settings.sd.scale, 1.5, 5);
+        body.guidance = clamp(extension_settings.sd.scale, 1.5, 20);
         body.width = clamp(extension_settings.sd.width, 256, 1440);
         body.height = clamp(extension_settings.sd.height, 256, 1440);
-        if (extension_settings.sd.seed >= 0) body.seed = extension_settings.sd.seed;
+        body.size = `${body.width}x${body.height}`;
+        if (negativePrompt) {
+            body.negative_prompt = negativePrompt;
+        }
     } else {
         body.n = 1;
         body.size = `${extension_settings.sd.width}x${extension_settings.sd.height}`;
-        body.quality = extension_settings.sd.openai_quality;
-        body.style = extension_settings.sd.openai_style;
+        if (modelLower.includes('dall-e') || modelLower.includes('gpt-image')) {
+            if (extension_settings.sd.openai_quality) body.quality = extension_settings.sd.openai_quality;
+            if (extension_settings.sd.openai_style) body.style = extension_settings.sd.openai_style;
+        }
+    }
+
+    if (extension_settings.sd.seed >= 0) {
+        body.seed = extension_settings.sd.seed;
     }
 
     const res = await fetch('/api/sd/aimlapi/generate-image', {
@@ -4204,7 +4232,7 @@ async function generateAimlapiImage(prompt, signal) {
     if (!res.ok) throw new Error(await res.text());
 
     const { format, data } = await res.json();
-    return { format, data };
+    return { format: format || 'png', data };
 }
 
 /**
@@ -4714,20 +4742,25 @@ async function generateZaiImage(prompt, signal) {
  * @returns {Promise<{format: string, data: string}>}
  */
 async function generateOpenRouterImage(prompt, signal) {
+    const body = {
+        model: extension_settings.sd.model,
+        prompt: prompt,
+        aspect_ratio: getClosestAspectRatio(extension_settings.sd.width, extension_settings.sd.height, 'openrouter'),
+    };
+    if (extension_settings.sd.seed >= 0) {
+        body.seed = extension_settings.sd.seed;
+    }
+
     const result = await fetch('/api/openrouter/image/generate', {
         method: 'POST',
         headers: getRequestHeaders(),
         signal: signal,
-        body: JSON.stringify({
-            model: extension_settings.sd.model,
-            prompt: prompt,
-            aspect_ratio: getClosestAspectRatio(extension_settings.sd.width, extension_settings.sd.height, 'stability'),
-        }),
+        body: JSON.stringify(body),
     });
 
     if (result.ok) {
         const data = await result.json();
-        return { format: 'jpg', data: data.image };
+        return { format: data.format || 'png', data: data.image };
     }
 
     const text = await result.text();
@@ -5940,6 +5973,7 @@ export async function init() {
                 [sources.comfy]: SECRET_KEYS.COMFY_RUNPOD,
                 [sources.pollinations]: SECRET_KEYS.POLLINATIONS,
                 [sources.workersai]: SECRET_KEYS.WORKERS_AI,
+                [sources.openrouter]: SECRET_KEYS.OPENROUTER,
             };
             const shouldReloadOptions = Object.entries(keySourceMap).some(([k, v]) => k === extension_settings.sd.source && v === key);
             if (!shouldReloadOptions) {

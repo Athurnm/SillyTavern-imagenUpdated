@@ -1818,14 +1818,19 @@ aimlapi.post('/models', async (request, response) => {
         const data = await modelsResponse.json();
         const models = (data.data || [])
             .filter(model =>
-                model.type === 'image' &&
+                (model.type === 'image' ||
+                 model.type === 'openai/image-generations' ||
+                 (Array.isArray(model.tags) && model.tags.includes('playground:image') && model.type !== 'openai/image-editing')) &&
                 model.id !== 'triposr' &&
-                model.id !== 'flux/dev/image-to-image',
+                !model.id.includes('image-to-image') &&
+                !model.id.includes('-edit') &&
+                !model.id.endsWith('/edit'),
             )
             .map(model => ({
                 value: model.id,
                 text: model.info?.name || model.id,
-            }));
+            }))
+            .sort((a, b) => a.text.localeCompare(b.text));
 
         return response.send({ data: models });
     } catch (error) {
@@ -1848,30 +1853,37 @@ aimlapi.post('/generate-image', async (req, res) => {
         });
         if (!apiRes.ok) {
             const err = await apiRes.text();
-            return res.status(500).send(err);
+            console.warn('AI/ML API image generation failed:', err);
+            return res.status(apiRes.status || 500).send(err);
         }
         /** @type {any} */
         const data = await apiRes.json();
 
-        const imgObj = Array.isArray(data.images) ? data.images[0] : data.data?.[0];
+        const imgObj = Array.isArray(data.images) ? data.images[0] : (Array.isArray(data.data) ? data.data[0] : null);
         if (!imgObj) return res.status(500).send('No image returned');
 
         let base64;
+        let format = 'png';
         if (imgObj.b64_json || imgObj.base64) {
             base64 = imgObj.b64_json || imgObj.base64;
+            if (imgObj.mime_type) {
+                format = mime.extension(imgObj.mime_type) || 'png';
+            }
         } else if (imgObj.url) {
             const blobRes = await fetch(imgObj.url);
             if (!blobRes.ok) throw new Error('Failed to fetch image URL');
+            const contentType = blobRes.headers.get('content-type');
+            if (contentType) format = mime.extension(contentType) || 'png';
             const buffer = await blobRes.arrayBuffer();
             base64 = Buffer.from(buffer).toString('base64');
         } else {
             throw new Error('Unsupported image format');
         }
 
-        return res.json({ format: 'png', data: base64 });
+        return res.json({ format: format, data: base64 });
     } catch (e) {
         console.error(e);
-        res.status(500).send('Internal error');
+        res.status(500).send(e instanceof Error ? e.message : 'Internal error');
     }
 });
 
